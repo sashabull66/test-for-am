@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Camera Pinch Zoom (Fixed)</title>
+    <title>Smooth Camera Pinch Zoom</title>
     <style>
         body {
             margin: 0;
@@ -15,8 +15,9 @@
             flex-direction: column;
             align-items: center;
             touch-action: none;
+            overflow: hidden;
         }
-        #container {
+        #camera-container {
             position: relative;
             width: 100%;
             max-width: 500px;
@@ -29,80 +30,82 @@
             object-fit: cover;
             transform: scaleX(-1);
         }
-        #zoom-display {
+        #zoom-info {
             position: absolute;
             bottom: 20px;
             left: 20px;
             background: rgba(0,0,0,0.7);
-            padding: 10px;
-            border-radius: 5px;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 14px;
         }
         #status {
-            margin-top: 20px;
+            margin-top: 15px;
             padding: 10px;
+            text-align: center;
         }
     </style>
 </head>
 <body>
-    <h1>Camera Pinch Zoom</h1>
-    <div id="container">
+    <h1>Smooth Camera Zoom</h1>
+    <div id="camera-container">
         <video id="video" autoplay playsinline muted></video>
-        <div id="zoom-display">Zoom: 1x</div>
+        <div id="zoom-info">Zoom: 1×</div>
     </div>
-    <div id="status">Initializing camera...</div>
+    <div id="status">Starting camera...</div>
 
     <script>
-        document.addEventListener('DOMContentLoaded', async () => {
+        (async function() {
             const video = document.getElementById('video');
-            const zoomDisplay = document.getElementById('zoom-display');
-            const statusElement = document.getElementById('status');
+            const zoomInfo = document.getElementById('zoom-info');
+            const statusEl = document.getElementById('status');
             
             let stream = null;
             let videoTrack = null;
-            let initialDistance = null;
+            let zoomTarget = 1;
             let currentZoom = 1;
-            let maxZoom = 1;
             let minZoom = 1;
-            let lastZoomTime = 0;
-            let isZoomSupported = false;
+            let maxZoom = 1;
+            let isZooming = false;
+            let animationFrameId = null;
+            let touchStartZoom = 1;
+            let touchStartDistance = 0;
 
-            async function initCamera() {
-                try {
-                    statusElement.textContent = "Accessing camera...";
-                    
-                    stream = await navigator.mediaDevices.getUserMedia({
-                        video: {
-                            facingMode: 'environment',
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 }
-                        }
-                    });
-                    
-                    video.srcObject = stream;
-                    videoTrack = stream.getVideoTracks()[0];
-                    
-                    // Check zoom capabilities
-                    const capabilities = videoTrack.getCapabilities();
-                    if (capabilities.zoom) {
-                        isZoomSupported = true;
-                        minZoom = capabilities.zoom.min;
-                        maxZoom = capabilities.zoom.max;
-                        currentZoom = minZoom;
-                        statusElement.textContent = "Pinch with two fingers to zoom";
-                    } else {
-                        statusElement.textContent = "Zoom not supported by your camera";
+            // 1. Initialize camera
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'environment',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
                     }
-                    
-                    updateZoomDisplay();
-                    setupTouchEvents();
-                    
-                } catch (err) {
-                    statusElement.textContent = `Error: ${err.message}`;
-                    console.error("Camera error:", err);
+                });
+                
+                video.srcObject = stream;
+                videoTrack = stream.getVideoTracks()[0];
+                
+                // Check zoom capabilities
+                const capabilities = videoTrack.getCapabilities();
+                if (capabilities.zoom) {
+                    minZoom = capabilities.zoom.min;
+                    maxZoom = Math.min(capabilities.zoom.max, 5); // Limit to 5x max
+                    statusEl.textContent = "Use two fingers to zoom smoothly";
+                } else {
+                    statusEl.textContent = "Zoom not supported by your camera";
+                    return;
                 }
+                
+                updateZoomDisplay();
+                setupTouchHandlers();
+                startZoomAnimation();
+                
+            } catch (err) {
+                statusEl.textContent = `Error: ${err.message}`;
+                console.error("Camera error:", err);
             }
 
-            function setupTouchEvents() {
+            // 2. Touch handlers for pinch zoom
+            function setupTouchHandlers() {
                 video.addEventListener('touchstart', handleTouchStart, { passive: false });
                 video.addEventListener('touchmove', handleTouchMove, { passive: false });
                 video.addEventListener('touchend', handleTouchEnd);
@@ -111,67 +114,74 @@
             function handleTouchStart(e) {
                 if (e.touches.length === 2) {
                     e.preventDefault();
-                    initialDistance = getDistance(e.touches[0], e.touches[1]);
+                    touchStartDistance = getTouchDistance(e.touches);
+                    touchStartZoom = currentZoom;
+                    isZooming = true;
                 }
             }
 
             function handleTouchMove(e) {
-                if (e.touches.length === 2 && initialDistance !== null && isZoomSupported) {
+                if (isZooming && e.touches.length === 2) {
                     e.preventDefault();
-                    
-                    const now = Date.now();
-                    // Throttle zoom updates to 60ms
-                    if (now - lastZoomTime < 60) return;
-                    
-                    const currentDistance = getDistance(e.touches[0], e.touches[1]);
-                    const scale = currentDistance / initialDistance;
-                    
-                    let newZoom = currentZoom * scale;
-                    newZoom = Math.max(minZoom, Math.min(newZoom, maxZoom));
-                    
-                    if (Math.abs(newZoom - currentZoom) > 0.05) {
-                        applyZoom(newZoom);
-                        lastZoomTime = now;
-                    }
+                    const currentDistance = getTouchDistance(e.touches);
+                    const scale = currentDistance / touchStartDistance;
+                    zoomTarget = Math.max(minZoom, Math.min(touchStartZoom * scale, maxZoom));
                 }
             }
 
             function handleTouchEnd() {
-                initialDistance = null;
+                isZooming = false;
             }
 
-            function getDistance(touch1, touch2) {
-                const dx = touch1.clientX - touch2.clientX;
-                const dy = touch1.clientY - touch2.clientY;
+            function getTouchDistance(touches) {
+                const dx = touches[0].clientX - touches[1].clientX;
+                const dy = touches[0].clientY - touches[1].clientY;
                 return Math.sqrt(dx * dx + dy * dy);
             }
 
-            async function applyZoom(zoomLevel) {
+            // 3. Smooth zoom animation
+            function startZoomAnimation() {
+                let lastTimestamp = 0;
+                
+                const animate = (timestamp) => {
+                    if (!lastTimestamp) lastTimestamp = timestamp;
+                    const deltaTime = timestamp - lastTimestamp;
+                    lastTimestamp = timestamp;
+                    
+                    // Smooth interpolation
+                    if (Math.abs(currentZoom - zoomTarget) > 0.01) {
+                        currentZoom += (zoomTarget - currentZoom) * 0.2; // Adjust for smoother/faster
+                        applyZoom(currentZoom);
+                        updateZoomDisplay();
+                    }
+                    
+                    animationFrameId = requestAnimationFrame(animate);
+                };
+                
+                animationFrameId = requestAnimationFrame(animate);
+            }
+
+            // 4. Apply zoom to camera
+            async function applyZoom(zoom) {
                 try {
                     await videoTrack.applyConstraints({
-                        advanced: [{ zoom: zoomLevel }]
+                        advanced: [{ zoom: zoom }]
                     });
-                    currentZoom = zoomLevel;
-                    updateZoomDisplay();
                 } catch (err) {
-                    console.error("Zoom error:", err);
+                    console.warn("Zoom error:", err);
                 }
             }
 
             function updateZoomDisplay() {
-                zoomDisplay.textContent = `Zoom: ${currentZoom.toFixed(1)}x`;
+                zoomInfo.textContent = `Zoom: ${currentZoom.toFixed(1)}×`;
             }
 
             // Cleanup
             window.addEventListener('beforeunload', () => {
-                if (stream) {
-                    stream.getTracks().forEach(track => track.stop());
-                }
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                if (stream) stream.getTracks().forEach(t => t.stop());
             });
-
-            // Initialize
-            initCamera();
-        });
+        })();
     </script>
 </body>
 </html>
